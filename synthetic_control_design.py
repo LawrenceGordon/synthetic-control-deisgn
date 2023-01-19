@@ -12,6 +12,7 @@ from Bio.Seq import Seq
 #import Bio.Data.IUPACData as bdi
 from itertools import product
 import random
+import numpy as np
 import textwrap
 
 # parses command-line arguments
@@ -141,6 +142,15 @@ def get_valid_sequences(complemented_manifest_data):
 
     return valid_seqs
 
+# generate dictionary of keys --> valid ambiguous sequences
+# values --> list of unambiguous valid sequences
+def get_valid_sequences2(complemented_manifest_data):
+    valid_seqs = {primer[direction]:disamb_sequences([primer[direction]]) \
+        for primer in complemented_manifest_data \
+        for direction in ("Forward", "Reverse")}
+
+    return valid_seqs
+
 # function for overwriting string with sequence
 def insert_sequence(original_sequence, insert, start):
     end = start + len(insert)
@@ -152,10 +162,6 @@ def insert_sequence(original_sequence, insert, start):
 
 # deterministic sequence design
 def deterministic_sequence_design(complemented_manifest_data, desired_gc, desired_length, invalid_seqs, valid_seqs, annealing_length):
-    # disambiguate invalid sequences
-    post = disamb_sequences([valid_seqs])
-    print(len(post))
-    
     nucleotides = "GCAT"
     nucleotides_list = ["G", "C", "A", "T"]
     nucleotides_set = set(["G", "C", "A", "T"])
@@ -197,6 +203,7 @@ def deterministic_sequence_design(complemented_manifest_data, desired_gc, desire
     print(invalid_seqs)
     print(valid_seqs)
     print(valid_continuation)
+
     iterations = 0
     while not sequence_pass:
         iterations += 1; print("Iteration {0}".format(iterations))
@@ -204,13 +211,8 @@ def deterministic_sequence_design(complemented_manifest_data, desired_gc, desire
 
         # main loop for filling in rest of control sequence
         for nucleotide in range(desired_length):
-            #print(nucleotide)
-            #print(control_sequence)
-            #print(control_sequence[nucleotide-annealing_length:nucleotide])
             if control_sequence[nucleotide] == "X":
-                #print(nucleotide)
                 prev_seq = ("").join(control_sequence[nucleotide-annealing_length+1:nucleotide])
-                #print(prev_seq)
                 valid_continuation.setdefault(prev_seq, (nucleotides, weights))
                 curr_nucs, curr_weights = valid_continuation[prev_seq]
                 control_sequence[nucleotide] = random.choices(curr_nucs, curr_weights, k=1)[0]
@@ -220,9 +222,23 @@ def deterministic_sequence_design(complemented_manifest_data, desired_gc, desire
         # begin searching for invalid sequences
         sequence_pass = True
         for seq in invalid_seqs:
-            print(seq, control_sequence.count(seq))
-            if control_sequence.count(seq) > valid_seqs.count(seq):
+            control_count = control_sequence.count(seq)
+            valid_count = 0; appearances = 0
+            for valid_amb, valid_disambs in valid_seqs.items():
+                appearances = max([valid_disamb.count(seq) for valid_disamb in valid_disambs])
+                valid_count += appearances
+                #max([valid_disamb.count(seq) for valid_disamb in valid_disambs])
+
+                # need to check if counter increased from ambiguous sequence
+                if appearances != 0 and valid_amb.count(seq) == 0:
+                    control_count += 1
+
+                appearances = 0
+                print(valid_amb, seq, control_count, valid_count)
+            #print(seq, control_sequence.count(seq), valid_count)
+            if control_count > valid_count:
                 sequence_pass = False
+                break
 
     return control_sequence
 
@@ -377,9 +393,17 @@ def main():
     # add invalid homopolymers
     if args.h_length != 0 or args.h_length != 1:
         invalid_seqs = invalid_homopolymers(invalid_seqs, args.h_length)
-    valid_seqs = get_valid_sequences(complemented_manifest_data)
+    #valid_seqs = get_valid_sequences(complemented_manifest_data)
+    valid_seqs2 = get_valid_sequences2(complemented_manifest_data)
+
+    test = []
+    for lst in valid_seqs2.values():
+        for val in lst:
+            test.append(val)
+    
+    print(f"Valid sequences: {len(valid_seqs2)}\n{valid_seqs2}")
     ###control_sequence = sequence_design(complemented_manifest_data, args.gc, args.seq_length, invalid_seqs, valid_seqs)
-    control_sequence = deterministic_sequence_design(complemented_manifest_data, args.gc, args.seq_length, invalid_seqs, valid_seqs, args.ann_length)
+    control_sequence = deterministic_sequence_design(complemented_manifest_data, args.gc, args.seq_length, invalid_seqs, valid_seqs2, args.ann_length)
     header = write_sequence(control_sequence, args.out)
     print_sequences(control_sequence, complemented_manifest_data, header, args.out)
 
