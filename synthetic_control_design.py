@@ -9,6 +9,7 @@ import csv
 from copy import deepcopy
 import re
 from Bio.Seq import Seq
+from Bio.SeqUtils import gc_fraction
 #import Bio.Data.IUPACData as bdi
 from itertools import product
 import random
@@ -23,6 +24,7 @@ def parse_args():
     parser.add_argument("--gc", default=0.50, type=float, help="gc content of the desired sequence")
     parser.add_argument("--ann_length", default=6, type=int, help="length of the terminal primer sequence to consider")
     parser.add_argument("--h_length", default=5, type=int, help="length of the homopolymers to avoid; zero or one will allow any homopolymers")
+    parser.add_argument("--warn", action="store_true", help="print user warnings")
     parser.add_argument("--out", "-o", default="synthetic_control.fasta", help="output filename")
     return parser.parse_args()
 
@@ -107,6 +109,23 @@ def disamb_sequences(seq_list):
 
     return disamb_seq_list
 
+# get true gc considering given primers
+def true_gc(complemented_manifest_data, desired_gc, desired_length):
+    given_seqs = ""
+
+    # concatenate sequences
+    for primer in complemented_manifest_data:
+        given_seqs += primer['Forward']
+        given_seqs += primer['Reverse']
+    
+    # get gc content
+    given_gc = gc_fraction(given_seqs, ambiguous="weighted")
+    given_len = len(given_seqs)
+
+    true_gc = -1*(((given_gc*given_len)-(desired_gc*desired_length))/(desired_length-given_len))
+
+    return true_gc
+
 # set parameters for randomized sequence
 def derive_parameters(complemented_manifest_data, annealing_length):
     # define set of invalid string
@@ -167,8 +186,9 @@ def deterministic_sequence_design(complemented_manifest_data, desired_gc, desire
     nucleotides_set = set(["G", "C", "A", "T"])
 
     # define chance to pick nucleotide
-    gc_chance = desired_gc/2
-    at_chance = (1 - desired_gc)/2
+    target_gc = true_gc(complemented_manifest_data, desired_gc, desired_length)
+    gc_chance = target_gc/2
+    at_chance = (1 - target_gc)/2
     nucleotide_weights = {"G": gc_chance, "C": gc_chance, "A": at_chance, "T": at_chance}
     weights = [gc_chance, gc_chance, at_chance, at_chance]
     sequence_pass = False
@@ -199,11 +219,6 @@ def deterministic_sequence_design(complemented_manifest_data, desired_gc, desire
     
     starter_sequence = deepcopy([*control_sequence])
 
-
-    print(invalid_seqs)
-    print(valid_seqs)
-    print(valid_continuation)
-
     iterations = 0
     while not sequence_pass:
         iterations += 1; print("Iteration {0}".format(iterations))
@@ -227,53 +242,19 @@ def deterministic_sequence_design(complemented_manifest_data, desired_gc, desire
             for valid_amb, valid_disambs in valid_seqs.items():
                 appearances = max([valid_disamb.count(seq) for valid_disamb in valid_disambs])
                 valid_count += appearances
-                #max([valid_disamb.count(seq) for valid_disamb in valid_disambs])
 
                 # need to check if counter increased from ambiguous sequence
                 if appearances != 0 and valid_amb.count(seq) == 0:
                     control_count += 1
 
                 appearances = 0
-                print(valid_amb, seq, control_count, valid_count)
-            #print(seq, control_sequence.count(seq), valid_count)
+
+            # if invalid sequence appears outside of tolerable region break
             if control_count > valid_count:
                 sequence_pass = False
                 break
 
     return control_sequence
-
-    """
-    iterations = 0
-    while not sequence_pass:
-        # generate random sequence
-        control_sequence = ("").join(random.choices(nucleotides, weights=weights, k=desired_length))
-        iterations+=1
-        
-        # populate sequence with manifest data
-        for primer in complemented_manifest_data:
-            # insert forward primer
-            forward_seq = primer['Forward']
-            f_pos = int(primer['forward-start-pos'])-1
-            control_sequence = insert_sequence(control_sequence, forward_seq, f_pos)
-
-            # insert reverse primer
-            reverse_seq = primer['Reverse']
-            if reverse_seq != "":
-                r_pos = int(primer['reverse-start-pos'])-1
-                control_sequence = insert_sequence(control_sequence, reverse_seq, r_pos)
-
-        #print(control_sequence) if iterations % 100 == 0 else None
-
-        # begin searching for invalid sequences
-        sequence_pass = True
-        for seq in invalid_seqs:
-            if control_sequence.count(seq) > valid_seqs.count(seq):
-                sequence_pass = False
-                
-        # future: perform a check for tolerable differences in GC content
-
-    return control_sequence
-    """
 
 # generate sequence with desired features
 def sequence_design(complemented_manifest_data, desired_gc, desired_length, invalid_seqs, valid_seqs):
@@ -326,7 +307,7 @@ def nucleotide_composition(sequence):
     return (G, C, A, T)
 
 # print sequences with primers highlighted
-def print_sequences(control_sequence, complemented_manifest_data, header, out_file):
+def html_sequence(control_sequence, complemented_manifest_data, header, out_file):
 
     html_colors = ["blue", "fuchsia", "green", "maroon", "red", "teal", "yellow"]
     num_colors = len(html_colors)
@@ -384,8 +365,24 @@ def write_sequence(control_sequence, out_file):
 
     return header
 
+# calcualte likelihood for generating sequence
+def probability_warning(desired_length, homopolymer_length):
+    kmers = desired_length - homopolymer_length + 1
+    h_chance = 1-(((1/4)**homopolymer_length)*4)
+    valid_chance = 1/((h_chance)**kmers)
+    return input("Generating a {0} bp sequence without {1} length homopolymers is likely to occur in {2} generations. Would you like to proceed? Y/N: ".format(
+        desired_length, homopolymer_length, int(valid_chance)))
+
 def main():
     args = parse_args()
+
+    # prompt user if they want warnings
+    if args.warn:
+        user_inp = probability_warning(args.seq_length, args.h_length)
+        if user_inp == "N":
+            return
+
+    # parse manifest, reverse complement, and derive invalid sequences
     manifest_data = parse_manifest(args.manifest)
     complemented_manifest_data = reverse_complement(manifest_data)
     invalid_seqs = derive_parameters(complemented_manifest_data, args.ann_length)
@@ -393,18 +390,17 @@ def main():
     # add invalid homopolymers
     if args.h_length != 0 or args.h_length != 1:
         invalid_seqs = invalid_homopolymers(invalid_seqs, args.h_length)
-    #valid_seqs = get_valid_sequences(complemented_manifest_data)
+
+    # generate disambiguated valid sequences
+    ###valid_seqs = get_valid_sequences(complemented_manifest_data)
     valid_seqs2 = get_valid_sequences2(complemented_manifest_data)
 
-    test = []
-    for lst in valid_seqs2.values():
-        for val in lst:
-            test.append(val)
-    
-    print(f"Valid sequences: {len(valid_seqs2)}\n{valid_seqs2}")
+    # design sequences
     ###control_sequence = sequence_design(complemented_manifest_data, args.gc, args.seq_length, invalid_seqs, valid_seqs)
     control_sequence = deterministic_sequence_design(complemented_manifest_data, args.gc, args.seq_length, invalid_seqs, valid_seqs2, args.ann_length)
+
+    # write sequence to fasta and html
     header = write_sequence(control_sequence, args.out)
-    print_sequences(control_sequence, complemented_manifest_data, header, args.out)
+    html_sequence(control_sequence, complemented_manifest_data, header, args.out)
 
 main()
